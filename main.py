@@ -255,7 +255,7 @@ if __name__ == "__main__":
 
     print(f"Testing attention with sdpa: {sdpa}")
     with sdpa_kernel(sdpa):
-        x = torch.randn(1, 1, 1, 1).cuda().half()
+        x = torch.randn(1, 1, 1, 8).cuda().half()
         with sdpa_kernel(sdpa):
             scaled_dot_product_attention(x, x, x)
     
