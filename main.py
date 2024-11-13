@@ -233,6 +233,9 @@ if __name__ == "__main__":
         dtype = torch.float32
     print(f"Running with dtype: {dtype}")
 
+    torch.backends.cuda.enable_math_sdp(False)
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
     if args.sdpa == 'math':
         torch.backends.cuda.enable_math_sdp(True)
     elif args.sdpa == 'flash':
