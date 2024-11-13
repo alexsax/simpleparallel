@@ -18,13 +18,13 @@ def get_global_transformer(encoder):
         d_model=encoder.embed_dim,  # Match ViT-Base dimension
         nhead=12,
         dim_feedforward=3072,
-        dropout=0.1,
-        activation='gelu'
+        dropout=0.0,
+        activation='gelu',
     )
 
     transformer = TransformerEncoder(
         encoder_layer,
-        num_layers=6
+        num_layers=6,
     )
     return transformer
 
@@ -56,6 +56,9 @@ class ParallelFast3r(nn.Module):
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
 
+    @torch.inference_mode()
+    # @torch.compile()
+    # @torch.jit.script
     def forward(self, images):
         # Ensure input is on the correct device
         # images = images.to(torch.cuda.current_device())
@@ -88,7 +91,7 @@ class ParallelFast3r(nn.Module):
         tokens = torch.cat(gathered_tokens, dim=0)  # Shape: (B*K, N, C)
         tokens = tokens.view(B, -1, self.encoder.embed_dim) # Shape: (B, K*N, C)
     
-        transformed = self.transformer(tokens.contiguous()  )
+        transformed = self.transformer(tokens.contiguous())
     
         transformed = transformed.view(B * K, -1, self.encoder.embed_dim) # Shape: (B*K, N, C)
         transformed_split = torch.chunk(transformed, self.world_size, dim=0)
@@ -98,7 +101,7 @@ class ParallelFast3r(nn.Module):
         tokens_multilayer = [tok for tok in local_tokens_multilayer]
         tokens_multilayer[-1] = local_transformed
         local_decoded = self.decoder(tokens_multilayer, img_info=(H, W))
-
+        return local_decoded
         # Gather final outputs
         gathered_outputs = [torch.zeros_like(local_decoded) for _ in range(self.world_size)]
         dist.all_gather(gathered_outputs, local_decoded.contiguous())
@@ -107,7 +110,7 @@ class ParallelFast3r(nn.Module):
         # Reshape back to (B, K, C, H, W)
         output = output.view(B, K, C, H, W)
         # output = output.view(K, C, H, W)
-        
+         
         return output
 
 
