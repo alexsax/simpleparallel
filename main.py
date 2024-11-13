@@ -88,7 +88,7 @@ class ParallelFast3r(nn.Module):
         tokens = torch.cat(gathered_tokens, dim=0)  # Shape: (B*K, N, C)
         tokens = tokens.view(B, -1, self.encoder.embed_dim) # Shape: (B, K*N, C)
     
-        transformed = self.transformer(tokens)
+        transformed = self.transformer(tokens.contiguous()  )
     
         transformed = transformed.view(B * K, -1, self.encoder.embed_dim) # Shape: (B*K, N, C)
         transformed_split = torch.chunk(transformed, self.world_size, dim=0)
@@ -101,7 +101,7 @@ class ParallelFast3r(nn.Module):
 
         # Gather final outputs
         gathered_outputs = [torch.zeros_like(local_decoded) for _ in range(self.world_size)]
-        dist.all_gather(gathered_outputs, local_decoded)
+        dist.all_gather(gathered_outputs, local_decoded.contiguous())
         output = torch.cat(gathered_outputs, dim=0)
         
         # Reshape back to (B, K, C, H, W)
@@ -118,8 +118,9 @@ def run_model(
         image_size: int, 
         patch_size: int, 
         num_frames: int,
-        num_warmup: int = 3,    # Number of warmup runs
-        num_trials: int = 10    # Number of timing trials
+        num_warmup: int = 3,
+        num_trials: int = 10,
+        dtype: str = 'half'
     ) -> None:
     torch.set_grad_enabled(False)
     dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
@@ -139,19 +140,19 @@ def run_model(
         print(f"Trainable Parameters: {trainable_params:,}")
     
     model = nn.parallel.DistributedDataParallel(model, device_ids=[rank])
-
-    # Create dummy input: (batch, frames, channels, height, width)
+    
+    # Create dummy input
     images = torch.randn(batch_size, num_frames, 3, image_size, image_size).to(rank)
     
-    # Warmup runs
+    # Warmup runs with autocast
     if rank == 0:
         print(f"\nPerforming {num_warmup} warmup runs...")
     for _ in range(num_warmup):
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.amp.autocast('cuda', dtype=dtype):
             _ = model(images)
     torch.cuda.synchronize()
     
-    # Multiple timing trials
+    # Multiple timing trials with autocast
     if rank == 0:
         print(f"\nRunning {num_trials} timing trials...")
     
@@ -162,7 +163,7 @@ def run_model(
         torch.cuda.reset_peak_memory_stats(rank)
         start_time = time.time()
         
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.amp.autocast('cuda', dtype=dtype):
             output = model(images)
         
         torch.cuda.synchronize()
@@ -196,7 +197,10 @@ if __name__ == "__main__":
     from functools import partial
     import math
     import os
-
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_math_sdp(False)
+    
     # Set environment variables for distributed training
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'  # You can use any free port number
@@ -208,6 +212,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_frames', type=int, default=16, help='Number of frames to process')
     parser.add_argument('--num_warmup', type=int, default=3, help='Number of warmup runs')
     parser.add_argument('--num_trials', type=int, default=10, help='Number of timing trials')
+    parser.add_argument('--dtype', type=str, default='half', help='Data type for processing')
     args = parser.parse_args()
 
     batch_size = args.batch_size
@@ -216,6 +221,13 @@ if __name__ == "__main__":
     num_frames = args.num_frames
 
     world_size = torch.cuda.device_count()
+    if args.dtype == 'half':
+        dtype = torch.float16
+    elif args.dtype == 'bf16':
+        dtype = torch.bfloat16
+    else:
+        dtype = torch.float32
+    print(f"Running with dtype: {dtype}")
     mp.spawn(
         run_model,
         args=(
@@ -225,7 +237,8 @@ if __name__ == "__main__":
             args.patch_size, 
             args.num_frames, 
             args.num_warmup, 
-            args.num_trials
+            args.num_trials,
+            dtype
         ),
         nprocs=world_size,
         join=True)
