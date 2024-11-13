@@ -234,6 +234,8 @@ if __name__ == "__main__":
     num_frames = args.num_frames
 
     world_size = torch.cuda.device_count()
+    print(f"Number of GPUs: {world_size}")
+
     if args.dtype == 'half':
         dtype = torch.float16
     elif args.dtype == 'bf16':
@@ -253,7 +255,7 @@ if __name__ == "__main__":
 
     print(f"Testing attention with sdpa: {sdpa}")
     with sdpa_kernel(sdpa):
-        x = torch.randn(1, 1, 1, 1).cuda()
+        x = torch.randn(1, 1, 1, 1).cuda().half()
         with sdpa_kernel(sdpa):
             scaled_dot_product_attention(x, x, x)
     
