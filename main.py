@@ -9,6 +9,7 @@ from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import time
 
 from model.dpt_head import create_dpt_head
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 def get_encoder():
     return torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
@@ -123,7 +124,8 @@ def run_model(
         num_frames: int,
         num_warmup: int = 3,
         num_trials: int = 10,
-        dtype: str = 'half'
+        dtype: torch.dtype = torch.float32,
+        sdpa: SDPBackend = SDPBackend.MATH,
     ) -> None:
     torch.set_grad_enabled(False)
     dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
@@ -151,7 +153,9 @@ def run_model(
     if rank == 0:
         print(f"\nPerforming {num_warmup} warmup runs...")
     for _ in range(num_warmup):
-        with torch.inference_mode(), torch.amp.autocast('cuda', dtype=dtype):
+        with torch.inference_mode(), \
+            torch.amp.autocast('cuda', dtype=dtype), \
+            torch.nn.attention.sdpa_kernel([sdpa]):
             _ = model(images)
     torch.cuda.synchronize()
     
@@ -200,10 +204,8 @@ if __name__ == "__main__":
     from functools import partial
     import math
     import os
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_math_sdp(False)
-    
+    from torch.nn.functional import scaled_dot_product_attention
+
     # Set environment variables for distributed training
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'  # You can use any free port number
@@ -233,18 +235,19 @@ if __name__ == "__main__":
         dtype = torch.float32
     print(f"Running with dtype: {dtype}")
 
-    torch.backends.cuda.enable_math_sdp(False)
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    if args.sdpa == 'math':
-        torch.backends.cuda.enable_math_sdp(True)
-    elif args.sdpa == 'flash':
-        torch.backends.cuda.enable_flash_sdp(True)
+    if args.sdpa == 'flash':
+        sdpa = SDPBackend.FLASH_ATTENTION
     elif args.sdpa == 'mem':
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        sdpa = SDPBackend.EFFICIENT_ATTENTION
     else:
-        raise ValueError(f"Invalid SDPA type: {args.sdpa}")
+        sdpa = SDPBackend.MATH
 
+    print(f"Testing attention with sdpa: {sdpa}")
+    with sdpa_kernel(sdpa):
+        x = torch.randn(1, 1, 1, 1).cuda()
+        with sdpa_kernel(sdpa):
+            scaled_dot_product_attention(x, x, x)
+    
     mp.spawn(
         run_model,
         args=(
@@ -255,7 +258,8 @@ if __name__ == "__main__":
             args.num_frames, 
             args.num_warmup, 
             args.num_trials,
-            dtype
+            dtype,
+            args.sdpa
         ),
         nprocs=world_size,
         join=True)
