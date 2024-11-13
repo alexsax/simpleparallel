@@ -11,6 +11,12 @@ import time
 from model.dpt_head import create_dpt_head
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+SDPA_TYPES = {
+    'flash': SDPBackend.FLASH_ATTENTION,
+    'mem': SDPBackend.EFFICIENT_ATTENTION,
+    'math': SDPBackend.MATH,
+}
+
 def get_encoder():
     return torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
 
@@ -125,11 +131,12 @@ def run_model(
         num_warmup: int = 3,
         num_trials: int = 10,
         dtype: torch.dtype = torch.float32,
-        sdpa: SDPBackend = SDPBackend.MATH,
+        sdpa_str: str = 'math',
     ) -> None:
     torch.set_grad_enabled(False)
     dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
     torch.cuda.set_device(rank)
+    sdpa = SDPA_TYPES[sdpa_str]
 
     model = ParallelFast3r(
         image_size=image_size,
@@ -217,8 +224,8 @@ if __name__ == "__main__":
     parser.add_argument('--num_frames', type=int, default=16, help='Number of frames to process')
     parser.add_argument('--num_warmup', type=int, default=3, help='Number of warmup runs')
     parser.add_argument('--num_trials', type=int, default=10, help='Number of timing trials')
-    parser.add_argument('--dtype', type=str, default='half', help='Data type for processing')
-    parser.add_argument('--sdpa', type=str, default='math', help='SDPA type for processing')
+    parser.add_argument('--dtype', type=str, choices=['half', 'bf16', 'float'], default='half', help='Data type for processing')
+    parser.add_argument('--sdpa', type=str, choices=list(SDPA_TYPES.keys()), default='math', help='SDPA type for processing')
     args = parser.parse_args()
 
     batch_size = args.batch_size
@@ -239,8 +246,10 @@ if __name__ == "__main__":
         sdpa = SDPBackend.FLASH_ATTENTION
     elif args.sdpa == 'mem':
         sdpa = SDPBackend.EFFICIENT_ATTENTION
-    else:
+    elif args.sdpa == 'math':
         sdpa = SDPBackend.MATH
+    else:
+        raise ValueError(f"Invalid SDPA type: {args.sdpa}")
 
     print(f"Testing attention with sdpa: {sdpa}")
     with sdpa_kernel(sdpa):
