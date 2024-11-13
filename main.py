@@ -216,6 +216,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_warmup', type=int, default=3, help='Number of warmup runs')
     parser.add_argument('--num_trials', type=int, default=10, help='Number of timing trials')
     parser.add_argument('--dtype', type=str, default='half', help='Data type for processing')
+    parser.add_argument('--sdpa', type=str, default='math', help='SDPA type for processing')
     args = parser.parse_args()
 
     batch_size = args.batch_size
@@ -231,6 +232,16 @@ if __name__ == "__main__":
     else:
         dtype = torch.float32
     print(f"Running with dtype: {dtype}")
+
+    if args.sdpa == 'math':
+        torch.backends.cuda.enable_math_sdp(True)
+    elif args.sdpa == 'flash':
+        torch.backends.cuda.enable_flash_sdp(True)
+    elif args.sdpa == 'mem':
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+    else:
+        raise ValueError(f"Invalid SDPA type: {args.sdpa}")
+
     mp.spawn(
         run_model,
         args=(
